@@ -1,0 +1,647 @@
+*&---------------------------------------------------------------------*
+*& Report ZBASIS_TRANSPORT_FILE_MANAGER
+*&---------------------------------------------------------------------*
+*& Transport Download/Upload Manager with Test Mode - OO Design
+*&---------------------------------------------------------------------*
+REPORT zbasis_transport_file_manager.
+
+TABLES: e070.
+
+*----------------------------------------------------------------------*
+* Type Definitions
+*----------------------------------------------------------------------*
+TYPES: BEGIN OF ty_file_list,
+         cofile   TYPE string,
+         datafile TYPE string,
+       END OF ty_file_list.
+
+*----------------------------------------------------------------------*
+* Selection Screen
+*----------------------------------------------------------------------*
+SELECTION-SCREEN BEGIN OF BLOCK b1 WITH FRAME TITLE TEXT-001.
+SELECT-OPTIONS: s_trkorr FOR e070-trkorr OBLIGATORY.
+SELECTION-SCREEN END OF BLOCK b1.
+
+SELECTION-SCREEN BEGIN OF BLOCK b2 WITH FRAME TITLE TEXT-002.
+PARAMETERS: p_test AS CHECKBOX DEFAULT 'X'.
+PARAMETERS: p_srcdir TYPE string LOWER CASE,
+            p_dstdir TYPE string LOWER CASE.
+SELECTION-SCREEN END OF BLOCK b2.
+
+SELECTION-SCREEN BEGIN OF BLOCK b3 WITH FRAME.
+PARAMETERS: p_spath TYPE string DEFAULT '/usr/sap/trans' OBLIGATORY LOWER CASE.
+SELECTION-SCREEN END OF BLOCK b3.
+
+
+SELECTION-SCREEN BEGIN OF BLOCK b4 WITH FRAME TITLE TEXT-003.
+PARAMETERS: p_down RADIOBUTTON GROUP rg1 DEFAULT 'X',
+            p_up   RADIOBUTTON GROUP rg1.
+SELECTION-SCREEN END OF BLOCK b4.
+
+*----------------------------------------------------------------------*
+* Class Definitions
+*----------------------------------------------------------------------*
+
+*----------------------------------------------------------------------*
+* File Operations Handler
+*----------------------------------------------------------------------*
+CLASS lcl_file_operations DEFINITION.
+  PUBLIC SECTION.
+    METHODS:
+      check_file_exists
+        IMPORTING
+          iv_filepath      TYPE string
+        RETURNING
+          VALUE(rv_exists) TYPE abap_bool,
+
+      download_from_server
+        IMPORTING
+          iv_src_path       TYPE string
+          iv_dst_path       TYPE string
+        RETURNING
+          VALUE(rv_success) TYPE abap_bool,
+
+      upload_to_server
+        IMPORTING
+          iv_src_path       TYPE string
+          iv_dst_path       TYPE string
+        RETURNING
+          VALUE(rv_success) TYPE abap_bool,
+
+      read_directory
+        IMPORTING
+          iv_directory    TYPE string
+        RETURNING
+          VALUE(rt_files) TYPE stringtab,
+
+      create_directory
+        IMPORTING
+          iv_directory TYPE string.
+
+  PRIVATE SECTION.
+    METHODS:
+      read_binary_from_server
+        IMPORTING
+          iv_filepath    TYPE string
+        RETURNING
+          VALUE(rt_data) TYPE solix_tab,
+
+      write_binary_to_server
+        IMPORTING
+          iv_filepath       TYPE string
+          it_data           TYPE solix_tab
+        RETURNING
+          VALUE(rv_success) TYPE abap_bool.
+ENDCLASS.
+
+*----------------------------------------------------------------------*
+* ALV Display Handler
+*----------------------------------------------------------------------*
+CLASS lcl_alv_display DEFINITION.
+  PUBLIC SECTION.
+    METHODS:
+      display_file_list
+        IMPORTING
+          it_files TYPE table.
+
+  PRIVATE SECTION.
+    METHODS:
+      setup_columns
+        IMPORTING
+          io_columns TYPE REF TO cl_salv_columns_table,
+
+      setup_functions
+        IMPORTING
+          io_functions TYPE REF TO cl_salv_functions_list.
+ENDCLASS.
+
+*----------------------------------------------------------------------*
+* Directory Helper
+*----------------------------------------------------------------------*
+CLASS lcl_directory_helper DEFINITION.
+  PUBLIC SECTION.
+    CLASS-METHODS:
+      browse_directory
+        RETURNING
+          VALUE(rv_directory) TYPE string.
+ENDCLASS.
+
+*----------------------------------------------------------------------*
+* Transport File Manager - Main Controller
+*----------------------------------------------------------------------*
+CLASS lcl_transport_manager DEFINITION.
+  PUBLIC SECTION.
+    METHODS:
+      constructor
+        IMPORTING
+          iv_test_mode TYPE abap_bool
+          iv_src_dir   TYPE string
+          iv_dst_dir   TYPE string
+          it_trkorr    TYPE STANDARD TABLE,
+
+      execute_download,
+      execute_upload,
+      display_results.
+
+  PRIVATE SECTION.
+    DATA:
+      mv_test_mode TYPE abap_bool,
+      mv_src_dir   TYPE string,
+      mv_dst_dir   TYPE string,
+      mt_trkorr    TYPE STANDARD TABLE OF rsdsselopt,
+      mt_files     TYPE TABLE OF ty_file_list,
+      mv_trans_dir TYPE string,
+      mv_codir     TYPE string,
+      mv_dadir     TYPE string,
+      mo_file_ops  TYPE REF TO lcl_file_operations,
+      mo_alv       TYPE REF TO lcl_alv_display.
+
+    METHODS:
+      get_transport_directory,
+      build_file_names
+        IMPORTING
+          iv_trkorr   TYPE trkorr
+        EXPORTING
+          ev_cofile   TYPE string
+          ev_datafile TYPE string,
+      process_download_transport
+        IMPORTING
+          iv_trkorr TYPE trkorr,
+      process_upload_directory.
+ENDCLASS.
+
+*----------------------------------------------------------------------*
+* Class Implementations
+*----------------------------------------------------------------------*
+
+*----------------------------------------------------------------------*
+* Transport Manager Implementation
+*----------------------------------------------------------------------*
+CLASS lcl_transport_manager IMPLEMENTATION.
+
+  METHOD constructor.
+    mv_test_mode = iv_test_mode.
+    mv_src_dir   = iv_src_dir.
+    mv_dst_dir   = iv_dst_dir.
+    mt_trkorr    = it_trkorr.
+
+    CREATE OBJECT mo_file_ops.
+    CREATE OBJECT mo_alv.
+
+    get_transport_directory( ).
+  ENDMETHOD.
+
+  METHOD get_transport_directory.
+    CALL 'C_SAPGPARAM' ID 'NAME'  FIELD 'DIR_TRANS'
+                       ID 'VALUE' FIELD mv_trans_dir.
+
+    CONCATENATE mv_trans_dir '/cofiles' INTO mv_codir.
+    CONCATENATE mv_trans_dir '/data' INTO mv_dadir.
+  ENDMETHOD.
+
+  METHOD build_file_names.
+    DATA: lv_sysid TYPE sy-sysid.
+
+    lv_sysid = sy-sysid.
+
+    " COFILE: K + 7-digit transport number + system ID
+    CONCATENATE 'K' iv_trkorr+4(6) '.' lv_sysid INTO ev_cofile.
+
+    " DATA FILE: R + 7-digit transport number + system ID
+    CONCATENATE 'R' iv_trkorr+4(6) '.' lv_sysid INTO ev_datafile.
+  ENDMETHOD.
+
+  METHOD execute_download.
+    DATA: lt_trkorr_range TYPE STANDARD TABLE OF rsdsselopt,
+          ls_trkorr       TYPE rsdsselopt,
+          lv_trkorr       TYPE trkorr.
+
+    lt_trkorr_range = mt_trkorr.
+
+    LOOP AT lt_trkorr_range INTO ls_trkorr.
+      lv_trkorr = ls_trkorr-low.
+      process_download_transport( lv_trkorr ).
+    ENDLOOP.
+  ENDMETHOD.
+
+  METHOD process_download_transport.
+    DATA: lv_cofile   TYPE string,
+          lv_datafile TYPE string,
+          lv_src_co   TYPE string,
+          lv_src_da   TYPE string,
+          lv_dst_co   TYPE string,
+          lv_dst_da   TYPE string,
+          ls_file     TYPE ty_file_list.
+
+    " Build file names
+    build_file_names(
+      EXPORTING
+        iv_trkorr   = iv_trkorr
+      IMPORTING
+        ev_cofile   = lv_cofile
+        ev_datafile = lv_datafile ).
+
+    " Build source paths
+    CONCATENATE p_spath mv_codir '/' lv_cofile INTO lv_src_co.
+    CONCATENATE p_spath mv_dadir '/' lv_datafile INTO lv_src_da.
+
+    " Check if files exist
+    IF mo_file_ops->check_file_exists( lv_src_co ) = abap_true OR
+       mo_file_ops->check_file_exists( lv_src_da ) = abap_true.
+
+      ls_file-cofile   = lv_cofile.
+      ls_file-datafile = lv_datafile.
+      APPEND ls_file TO mt_files.
+
+      " Download files if not in test mode
+      IF mv_test_mode = abap_false AND mv_dst_dir IS NOT INITIAL.
+        " Build destination paths with subdirectories
+        CONCATENATE mv_dst_dir '\cofiles' INTO lv_dst_co.
+        CONCATENATE mv_dst_dir '\data' INTO lv_dst_da.
+
+        " Create subdirectories
+        mo_file_ops->create_directory( lv_dst_co ).
+        mo_file_ops->create_directory( lv_dst_da ).
+
+        " Download cofile
+        IF mo_file_ops->check_file_exists( lv_src_co ) = abap_true.
+          CONCATENATE lv_dst_co '\' lv_cofile INTO lv_dst_co.
+          mo_file_ops->download_from_server(
+            iv_src_path = lv_src_co
+            iv_dst_path = lv_dst_co ).
+        ENDIF.
+
+        " Download data file
+        IF mo_file_ops->check_file_exists( lv_src_da ) = abap_true.
+          CONCATENATE lv_dst_da '\' lv_datafile INTO lv_dst_da.
+          mo_file_ops->download_from_server(
+            iv_src_path = lv_src_da
+            iv_dst_path = lv_dst_da ).
+        ENDIF.
+      ENDIF.
+    ENDIF.
+  ENDMETHOD.
+
+  METHOD execute_upload.
+    process_upload_directory( ).
+  ENDMETHOD.
+
+  METHOD process_upload_directory.
+    DATA: lt_cofiles  TYPE stringtab,
+          lt_dafiles  TYPE stringtab,
+          lv_cofile   TYPE string,
+          lv_codir    TYPE string,
+          lv_dadir    TYPE string,
+          lv_src_path TYPE string,
+          lv_dst_path TYPE string,
+          lv_fname    TYPE string,
+          ls_file     TYPE ty_file_list.
+
+    IF mv_src_dir IS INITIAL.
+      MESSAGE 'Source directory is required for upload' TYPE 'E'.
+      RETURN.
+    ENDIF.
+
+    " Build source directory paths
+    CONCATENATE mv_src_dir '\cofiles' INTO lv_codir.
+    CONCATENATE mv_src_dir '\data' INTO lv_dadir.
+
+    " Read directory contents
+    lt_cofiles = mo_file_ops->read_directory( lv_codir ).
+    lt_dafiles = mo_file_ops->read_directory( lv_dadir ).
+
+    " Process each cofile
+    LOOP AT lt_cofiles INTO lv_cofile.
+      ls_file-cofile = lv_cofile.
+
+      " Find matching data file (K -> R pattern)
+      lv_fname = lv_cofile.
+      REPLACE 'K' IN lv_fname WITH 'R'.
+      READ TABLE lt_dafiles WITH KEY table_line = lv_fname TRANSPORTING NO FIELDS.
+      IF sy-subrc = 0.
+        ls_file-datafile = lv_fname.
+      ELSE.
+        CLEAR ls_file-datafile.
+      ENDIF.
+
+      APPEND ls_file TO mt_files.
+
+      " Upload files if not in test mode
+      IF mv_test_mode = abap_false.
+        " Upload cofile
+        IF ls_file-cofile IS NOT INITIAL.
+          CONCATENATE lv_codir '\' ls_file-cofile INTO lv_src_path.
+          CONCATENATE mv_codir '/' ls_file-cofile INTO lv_dst_path.
+          mo_file_ops->upload_to_server(
+            iv_src_path = lv_src_path
+            iv_dst_path = lv_dst_path ).
+        ENDIF.
+
+        " Upload data file
+        IF ls_file-datafile IS NOT INITIAL.
+          CONCATENATE lv_dadir '\' ls_file-datafile INTO lv_src_path.
+          CONCATENATE mv_dadir '/' ls_file-datafile INTO lv_dst_path.
+          mo_file_ops->upload_to_server(
+            iv_src_path = lv_src_path
+            iv_dst_path = lv_dst_path ).
+        ENDIF.
+      ENDIF.
+
+      CLEAR ls_file.
+    ENDLOOP.
+  ENDMETHOD.
+
+  METHOD display_results.
+    IF mt_files IS NOT INITIAL.
+      mo_alv->display_file_list( mt_files ).
+    ELSE.
+      MESSAGE 'No transport files found' TYPE 'I'.
+    ENDIF.
+  ENDMETHOD.
+
+ENDCLASS.
+
+*----------------------------------------------------------------------*
+* File Operations Implementation
+*----------------------------------------------------------------------*
+CLASS lcl_file_operations IMPLEMENTATION.
+
+  METHOD check_file_exists.
+    DATA: lv_exists TYPE abap_bool.
+
+    " Try application server first
+    OPEN DATASET iv_filepath FOR INPUT IN BINARY MODE.
+    IF sy-subrc = 0.
+      rv_exists = abap_true.
+      CLOSE DATASET iv_filepath.
+    ELSE.
+      rv_exists = abap_false.
+    ENDIF.
+  ENDMETHOD.
+
+
+  METHOD read_binary_from_server.
+    DATA: ls_data   TYPE solix,
+          lv_line   TYPE x255,
+          lv_length TYPE i VALUE 255.
+
+    OPEN DATASET iv_filepath FOR INPUT IN BINARY MODE.
+    IF sy-subrc = 0.
+      DO.
+        READ DATASET iv_filepath INTO lv_line LENGTH lv_length.
+        IF sy-subrc <> 0.
+          EXIT.
+        ENDIF.
+        ls_data-line = lv_line.
+        APPEND ls_data TO rt_data.
+      ENDDO.
+      CLOSE DATASET iv_filepath.
+    ENDIF.
+  ENDMETHOD.
+
+
+  METHOD write_binary_to_server.
+    DATA: ls_data TYPE solix.
+
+    rv_success = abap_false.
+
+    OPEN DATASET iv_filepath FOR OUTPUT IN BINARY MODE.
+    IF sy-subrc = 0.
+      LOOP AT it_data INTO ls_data.
+        TRANSFER ls_data-line TO iv_filepath.
+      ENDLOOP.
+      CLOSE DATASET iv_filepath.
+      rv_success = abap_true.
+    ENDIF.
+  ENDMETHOD.
+
+  METHOD download_from_server.
+    DATA: lt_data TYPE solix_tab,
+          lv_len  TYPE i.
+
+    rv_success = abap_false.
+
+    " Read from application server
+    lt_data = read_binary_from_server( iv_src_path ).
+
+    IF lt_data IS NOT INITIAL.
+      " Calculate file size
+      lv_len = lines( lt_data ) * 255.
+
+      " Write to presentation server
+      TRY.
+          cl_gui_frontend_services=>gui_download(
+            EXPORTING
+              bin_filesize = lv_len
+              filename     = iv_dst_path
+              filetype     = 'BIN'
+            CHANGING
+              data_tab     = lt_data
+            EXCEPTIONS
+              OTHERS       = 1 ).
+
+          IF sy-subrc = 0.
+            rv_success = abap_true.
+          ENDIF.
+        CATCH cx_root.
+          rv_success = abap_false.
+      ENDTRY.
+    ENDIF.
+  ENDMETHOD.
+
+  METHOD upload_to_server.
+    DATA: lt_data TYPE solix_tab,
+          lv_len  TYPE i.
+
+    rv_success = abap_false.
+
+    " Read from presentation server
+    TRY.
+        cl_gui_frontend_services=>gui_upload(
+          EXPORTING
+            filename   = iv_src_path
+            filetype   = 'BIN'
+          IMPORTING
+            filelength = lv_len
+          CHANGING
+            data_tab   = lt_data
+          EXCEPTIONS
+            OTHERS     = 1 ).
+
+        IF sy-subrc = 0.
+          " Write to application server
+          rv_success = write_binary_to_server(
+            iv_filepath = iv_dst_path
+            it_data     = lt_data ).
+        ENDIF.
+      CATCH cx_root.
+        rv_success = abap_false.
+    ENDTRY.
+  ENDMETHOD.
+
+  METHOD read_directory.
+    DATA: lt_files TYPE TABLE OF file_info,
+          ls_file  TYPE file_info,
+          lv_count TYPE i.
+
+    TRY.
+        cl_gui_frontend_services=>directory_list_files(
+          EXPORTING
+            directory  = iv_directory
+            filter     = '*.*'
+          CHANGING
+            file_table = lt_files
+                        count      = lv_count
+          EXCEPTIONS
+            OTHERS     = 1 ).
+
+        LOOP AT lt_files INTO ls_file.
+          APPEND ls_file-filename TO rt_files.
+        ENDLOOP.
+      CATCH cx_root.
+        CLEAR rt_files.
+    ENDTRY.
+  ENDMETHOD.
+
+  METHOD create_directory.
+    " Note: Directory creation on presentation server
+    " This is a placeholder - actual implementation may vary
+    " by operating system and GUI frontend capabilities
+    DATA: lv_result TYPE i.
+
+    TRY.
+        cl_gui_frontend_services=>directory_create(
+          EXPORTING
+            directory = iv_directory
+          CHANGING
+            rc        = lv_result
+          EXCEPTIONS
+            OTHERS    = 1 ).
+      CATCH cx_root.
+        " Directory might already exist or creation failed
+    ENDTRY.
+  ENDMETHOD.
+
+ENDCLASS.
+
+*----------------------------------------------------------------------*
+* ALV Display Implementation
+*----------------------------------------------------------------------*
+CLASS lcl_alv_display IMPLEMENTATION.
+
+  METHOD display_file_list.
+    DATA: lo_alv   TYPE REF TO cl_salv_table,
+          lt_files TYPE TABLE OF ty_file_list.
+    " Create local modifiable copy
+    lt_files = it_files.
+
+    TRY.
+        cl_salv_table=>factory(
+          IMPORTING
+            r_salv_table = lo_alv
+          CHANGING
+            t_table      = lt_files ).
+
+        " Setup functions
+        setup_functions( lo_alv->get_functions( ) ).
+
+        " Setup columns
+        setup_columns( lo_alv->get_columns( ) ).
+
+        " Display
+        lo_alv->display( ).
+
+      CATCH cx_salv_msg
+            cx_salv_not_found
+            cx_salv_data_error.
+        MESSAGE 'Error displaying ALV list' TYPE 'E'.
+    ENDTRY.
+  ENDMETHOD.
+
+  METHOD setup_columns.
+    DATA: lo_column TYPE REF TO cl_salv_column.
+
+    TRY.
+        " Optimize all columns
+        io_columns->set_optimize( abap_true ).
+
+        " Set column headers
+        lo_column = io_columns->get_column( 'COFILE' ).
+        lo_column->set_long_text( 'COFILE File Name' ).
+        lo_column->set_medium_text( 'COFILE Name' ).
+        lo_column->set_short_text( 'COFILE' ).
+
+        lo_column = io_columns->get_column( 'DATAFILE' ).
+        lo_column->set_long_text( 'DATA File Name' ).
+        lo_column->set_medium_text( 'DATA Name' ).
+        lo_column->set_short_text( 'DATA' ).
+
+      CATCH cx_salv_not_found.
+        " Column not found
+    ENDTRY.
+  ENDMETHOD.
+
+  METHOD setup_functions.
+    " Enable all standard functions
+    io_functions->set_all( abap_true ).
+  ENDMETHOD.
+
+ENDCLASS.
+
+*----------------------------------------------------------------------*
+* Directory Helper Implementation
+*----------------------------------------------------------------------*
+CLASS lcl_directory_helper IMPLEMENTATION.
+
+  METHOD browse_directory.
+    TRY.
+        cl_gui_frontend_services=>directory_browse(
+          CHANGING
+            selected_folder = rv_directory
+          EXCEPTIONS
+            OTHERS          = 1 ).
+      CATCH cx_root.
+        CLEAR rv_directory.
+    ENDTRY.
+  ENDMETHOD.
+
+ENDCLASS.
+
+*----------------------------------------------------------------------*
+* Main Program
+*----------------------------------------------------------------------*
+INITIALIZATION.
+
+
+*----------------------------------------------------------------------*
+* At Selection Screen Events
+*----------------------------------------------------------------------*
+AT SELECTION-SCREEN ON VALUE-REQUEST FOR p_srcdir.
+  p_srcdir = lcl_directory_helper=>browse_directory( ).
+
+AT SELECTION-SCREEN ON VALUE-REQUEST FOR p_dstdir.
+  p_dstdir = lcl_directory_helper=>browse_directory( ).
+
+*----------------------------------------------------------------------*
+* Start of Selection
+*----------------------------------------------------------------------*
+START-OF-SELECTION.
+  DATA: lo_manager TYPE REF TO lcl_transport_manager.
+  " Create transport manager instance
+  CREATE OBJECT lo_manager
+    EXPORTING
+      iv_test_mode = p_test
+      iv_src_dir   = p_srcdir
+      iv_dst_dir   = p_dstdir
+      it_trkorr    = s_trkorr[].
+
+  " Execute based on mode
+  IF p_down = 'X'.
+    lo_manager->execute_download( ).
+  ELSE.
+    lo_manager->execute_upload( ).
+  ENDIF.
+
+END-OF-SELECTION.
+  " Display results
+  lo_manager->display_results( ).
