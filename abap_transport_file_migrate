@@ -11,15 +11,18 @@ TABLES: e070.
 * Type Definitions
 *----------------------------------------------------------------------*
 TYPES: BEGIN OF ty_file_list,
+         trkorr   TYPE e070-trkorr,
          cofile   TYPE string,
          datafile TYPE string,
        END OF ty_file_list.
+
+DATA: gv_path TYPE x255.
 
 *----------------------------------------------------------------------*
 * Selection Screen
 *----------------------------------------------------------------------*
 SELECTION-SCREEN BEGIN OF BLOCK b1 WITH FRAME TITLE TEXT-001.
-SELECT-OPTIONS: s_trkorr FOR e070-trkorr OBLIGATORY.
+SELECT-OPTIONS: s_trkorr FOR e070-trkorr.
 SELECTION-SCREEN END OF BLOCK b1.
 
 SELECTION-SCREEN BEGIN OF BLOCK b2 WITH FRAME TITLE TEXT-002.
@@ -31,7 +34,6 @@ SELECTION-SCREEN END OF BLOCK b2.
 SELECTION-SCREEN BEGIN OF BLOCK b3 WITH FRAME.
 PARAMETERS: p_spath TYPE string DEFAULT '/usr/sap/trans' OBLIGATORY LOWER CASE.
 SELECTION-SCREEN END OF BLOCK b3.
-
 
 SELECTION-SCREEN BEGIN OF BLOCK b4 WITH FRAME TITLE TEXT-003.
 PARAMETERS: p_down RADIOBUTTON GROUP rg1 DEFAULT 'X',
@@ -203,11 +205,9 @@ CLASS lcl_transport_manager IMPLEMENTATION.
     DATA: lv_sysid TYPE sy-sysid.
 
     lv_sysid = sy-sysid.
-
-    " COFILE: K + 7-digit transport number + system ID
+    " COFILE: K + 6-digit transport number + system ID
     CONCATENATE 'K' iv_trkorr+4(6) '.' lv_sysid INTO ev_cofile.
-
-    " DATA FILE: R + 7-digit transport number + system ID
+    " DATA FILE: R + 6-digit transport number + system ID
     CONCATENATE 'R' iv_trkorr+4(6) '.' lv_sysid INTO ev_datafile.
   ENDMETHOD.
 
@@ -217,7 +217,6 @@ CLASS lcl_transport_manager IMPLEMENTATION.
           lv_trkorr       TYPE trkorr.
 
     lt_trkorr_range = mt_trkorr.
-
     LOOP AT lt_trkorr_range INTO ls_trkorr.
       lv_trkorr = ls_trkorr-low.
       process_download_transport( lv_trkorr ).
@@ -248,7 +247,7 @@ CLASS lcl_transport_manager IMPLEMENTATION.
     " Check if files exist
     IF mo_file_ops->check_file_exists( lv_src_co ) = abap_true OR
        mo_file_ops->check_file_exists( lv_src_da ) = abap_true.
-
+      ls_file-trkorr = iv_trkorr.
       ls_file-cofile   = lv_cofile.
       ls_file-datafile = lv_datafile.
       APPEND ls_file TO mt_files.
@@ -298,22 +297,18 @@ CLASS lcl_transport_manager IMPLEMENTATION.
           ls_file     TYPE ty_file_list.
 
     IF mv_src_dir IS INITIAL.
-      MESSAGE 'Source directory is required for upload' TYPE 'E'.
+      MESSAGE TEXT-e02 TYPE 'E'.
       RETURN.
     ENDIF.
-
     " Build source directory paths
     CONCATENATE mv_src_dir '\cofiles' INTO lv_codir.
     CONCATENATE mv_src_dir '\data' INTO lv_dadir.
-
     " Read directory contents
     lt_cofiles = mo_file_ops->read_directory( lv_codir ).
     lt_dafiles = mo_file_ops->read_directory( lv_dadir ).
-
     " Process each cofile
     LOOP AT lt_cofiles INTO lv_cofile.
       ls_file-cofile = lv_cofile.
-
       " Find matching data file (K -> R pattern)
       lv_fname = lv_cofile.
       REPLACE 'K' IN lv_fname WITH 'R'.
@@ -325,22 +320,20 @@ CLASS lcl_transport_manager IMPLEMENTATION.
       ENDIF.
 
       APPEND ls_file TO mt_files.
-
       " Upload files if not in test mode
       IF mv_test_mode = abap_false.
         " Upload cofile
         IF ls_file-cofile IS NOT INITIAL.
           CONCATENATE lv_codir '\' ls_file-cofile INTO lv_src_path.
-          CONCATENATE mv_codir '/' ls_file-cofile INTO lv_dst_path.
+          CONCATENATE p_spath mv_codir '/' ls_file-cofile INTO lv_dst_path.
           mo_file_ops->upload_to_server(
             iv_src_path = lv_src_path
             iv_dst_path = lv_dst_path ).
         ENDIF.
-
         " Upload data file
         IF ls_file-datafile IS NOT INITIAL.
           CONCATENATE lv_dadir '\' ls_file-datafile INTO lv_src_path.
-          CONCATENATE mv_dadir '/' ls_file-datafile INTO lv_dst_path.
+          CONCATENATE p_spath mv_dadir '/' ls_file-datafile INTO lv_dst_path.
           mo_file_ops->upload_to_server(
             iv_src_path = lv_src_path
             iv_dst_path = lv_dst_path ).
@@ -368,7 +361,6 @@ CLASS lcl_file_operations IMPLEMENTATION.
 
   METHOD check_file_exists.
     DATA: lv_exists TYPE abap_bool.
-
     " Try application server first
     OPEN DATASET iv_filepath FOR INPUT IN BINARY MODE.
     IF sy-subrc = 0.
@@ -404,7 +396,6 @@ CLASS lcl_file_operations IMPLEMENTATION.
     DATA: ls_data TYPE solix.
 
     rv_success = abap_false.
-
     OPEN DATASET iv_filepath FOR OUTPUT IN BINARY MODE.
     IF sy-subrc = 0.
       LOOP AT it_data INTO ls_data.
@@ -420,14 +411,11 @@ CLASS lcl_file_operations IMPLEMENTATION.
           lv_len  TYPE i.
 
     rv_success = abap_false.
-
     " Read from application server
     lt_data = read_binary_from_server( iv_src_path ).
-
     IF lt_data IS NOT INITIAL.
       " Calculate file size
       lv_len = lines( lt_data ) * 255.
-
       " Write to presentation server
       TRY.
           cl_gui_frontend_services=>gui_download(
@@ -454,7 +442,6 @@ CLASS lcl_file_operations IMPLEMENTATION.
           lv_len  TYPE i.
 
     rv_success = abap_false.
-
     " Read from presentation server
     TRY.
         cl_gui_frontend_services=>gui_upload(
@@ -467,7 +454,6 @@ CLASS lcl_file_operations IMPLEMENTATION.
             data_tab   = lt_data
           EXCEPTIONS
             OTHERS     = 1 ).
-
         IF sy-subrc = 0.
           " Write to application server
           rv_success = write_binary_to_server(
@@ -494,7 +480,6 @@ CLASS lcl_file_operations IMPLEMENTATION.
                         count      = lv_count
           EXCEPTIONS
             OTHERS     = 1 ).
-
         LOOP AT lt_files INTO ls_file.
           APPEND ls_file-filename TO rt_files.
         ENDLOOP.
@@ -534,20 +519,16 @@ CLASS lcl_alv_display IMPLEMENTATION.
           lt_files TYPE TABLE OF ty_file_list.
     " Create local modifiable copy
     lt_files = it_files.
-
     TRY.
         cl_salv_table=>factory(
           IMPORTING
             r_salv_table = lo_alv
           CHANGING
             t_table      = lt_files ).
-
         " Setup functions
         setup_functions( lo_alv->get_functions( ) ).
-
         " Setup columns
         setup_columns( lo_alv->get_columns( ) ).
-
         " Display
         lo_alv->display( ).
 
@@ -560,7 +541,6 @@ CLASS lcl_alv_display IMPLEMENTATION.
 
   METHOD setup_columns.
     DATA: lo_column TYPE REF TO cl_salv_column.
-
     TRY.
         " Optimize all columns
         io_columns->set_optimize( abap_true ).
@@ -568,12 +548,12 @@ CLASS lcl_alv_display IMPLEMENTATION.
         " Set column headers
         lo_column = io_columns->get_column( 'COFILE' ).
         lo_column->set_long_text( 'COFILE File Name' ).
-        lo_column->set_medium_text( 'COFILE Name' ).
+        lo_column->set_medium_text( 'COFILE File' ).
         lo_column->set_short_text( 'COFILE' ).
 
         lo_column = io_columns->get_column( 'DATAFILE' ).
         lo_column->set_long_text( 'DATA File Name' ).
-        lo_column->set_medium_text( 'DATA Name' ).
+        lo_column->set_medium_text( 'DATA File' ).
         lo_column->set_short_text( 'DATA' ).
 
       CATCH cx_salv_not_found.
@@ -616,6 +596,22 @@ INITIALIZATION.
 *----------------------------------------------------------------------*
 * At Selection Screen Events
 *----------------------------------------------------------------------*
+AT SELECTION-SCREEN.
+  " Ensure only one mode is selected (already handled by radio buttons)
+  " Validate required directories
+  IF p_down = abap_true.
+    IF p_dstdir IS INITIAL.
+      MESSAGE TEXT-e01 TYPE 'E'.
+    ENDIF.
+    IF s_trkorr IS INITIAL.
+      MESSAGE TEXT-e05 TYPE 'E'.
+    ENDIF.
+  ENDIF.
+
+  IF p_up = abap_true AND p_srcdir IS INITIAL.
+    MESSAGE TEXT-e02 TYPE 'E'.
+  ENDIF.
+
 AT SELECTION-SCREEN ON VALUE-REQUEST FOR p_srcdir.
   p_srcdir = lcl_directory_helper=>browse_directory( ).
 
