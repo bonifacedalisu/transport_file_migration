@@ -306,6 +306,16 @@ CLASS lcl_transport_manager IMPLEMENTATION.
     " Read directory contents
     lt_cofiles = mo_file_ops->read_directory( lv_codir ).
     lt_dafiles = mo_file_ops->read_directory( lv_dadir ).
+
+
+    " Filter lt_dafiles based on matching S_TRKORR select-option
+
+
+
+    " Filter lt_cofiles based on matching S_TRKORR select-option
+
+
+
     " Process each cofile
     LOOP AT lt_cofiles INTO lv_cofile.
       ls_file-cofile = lv_cofile.
